@@ -1,0 +1,16 @@
+# Build artifacts
+zig-out/
+zig-cache/
+
+# Package manager
+zig-pkg/
+
+# IDE
+.zls.json
+.zig-cache/
+
+# OS
+.DS_Store
+
+# Deepwork state (git-local)
+.slim/deepwork/
