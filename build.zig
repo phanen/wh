@@ -8,18 +8,25 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "wh", .module = mod },
+        },
+    });
+    exe_mod.linkSystemLibrary("zstd", .{});
 
     const exe = b.addExecutable(.{
         .name = "wh",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "wh", .module = mod },
-            },
-        }),
+        .root_module = exe_mod,
+        .use_llvm = true,
+        .use_lld = true,
     });
 
     b.installArtifact(exe);
@@ -34,11 +41,16 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .use_llvm = true,
+        .use_lld = true,
     });
+    mod_tests.root_module.linkSystemLibrary("zstd", .{});
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .use_llvm = true,
+        .use_lld = true,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 

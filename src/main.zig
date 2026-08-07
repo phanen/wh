@@ -5,11 +5,13 @@ const wh = @import("wh");
 const discover = wh.discover;
 const provider = wh.provider;
 const output = wh.output;
+const util = wh.util;
 const file_meta = wh.file_meta;
 const elf_info = wh.elf_info;
 const elf_deps = wh.elf_deps;
+const pacman = wh.pacman;
 
-const Providers = [_]provider.Provider{
+const AlwaysProviders = [_]provider.Provider{
     .{ .name = "file_meta", .run = file_meta.run },
     .{ .name = "elf_info", .run = elf_info.run },
     .{ .name = "elf_deps", .run = elf_deps.run },
@@ -62,16 +64,34 @@ pub fn main(init: std.process.Init) !void {
     var found_any = false;
 
     for (parse.targets) |target| {
-        const matches = if (parse.options.search_libs)
-            try discover.findLibrary(arena, environ_map, target, parse.options)
-        else
-            try discover.findBinary(arena, environ_map, target, parse.options);
+        const matches = try discover.find(arena, environ_map, target, parse.options);
 
         if (matches.len == 0) {
-            try stderr_w.writeAll("error: not found: ");
-            try stderr_w.writeAll(target);
-            try stderr_w.writeAll("\n");
-            stderr_w.flush() catch {};
+            const ctx: provider.Context = .{
+                .gpa = gpa,
+                .path = target,
+                .io = io,
+                .environ_map = environ_map,
+            };
+            const facts = pacman.run(ctx) catch |err| blk: {
+                try output.printError(stderr_w, style, @errorName(err));
+                break :blk try gpa.alloc(provider.Fact, 0);
+            };
+            if (facts.len > 0) {
+                try output.printName(stdout_w, style, target, null);
+                for (facts) |f| try output.printFact(stdout_w, style, f);
+                found_any = true;
+            } else {
+                try stderr_w.writeAll("error: not found: ");
+                try stderr_w.writeAll(target);
+                try stderr_w.writeAll("\n");
+                stderr_w.flush() catch {};
+            }
+            for (facts) |f| {
+                gpa.free(f.key);
+                gpa.free(f.value);
+            }
+            gpa.free(facts);
             continue;
         }
 
@@ -80,9 +100,11 @@ pub fn main(init: std.process.Init) !void {
         for (matches, 0..) |m, i| {
             if (i > 0) try stdout_w.writeByte('\n');
 
-            try output.printPathOnly(stdout_w, style, m.path);
+            const symlink = symlinkTarget(gpa, io, m.path);
+            defer if (symlink) |s| gpa.free(s);
+            try output.printName(stdout_w, style, m.path, symlink);
 
-            for (Providers) |p| {
+            for (AlwaysProviders) |p| {
                 const ctx: provider.Context = .{
                     .gpa = gpa,
                     .path = m.path,
@@ -93,14 +115,65 @@ pub fn main(init: std.process.Init) !void {
                     try output.printError(stderr_w, style, @errorName(err));
                     continue;
                 };
-                for (facts) |f| {
-                    try output.printFact(stdout_w, style, f);
+                defer {
+                    for (facts) |f| {
+                        gpa.free(f.key);
+                        gpa.free(f.value);
+                    }
+                    gpa.free(facts);
                 }
+                for (facts) |f| try output.printFact(stdout_w, style, f);
+            }
+
+            const ctx: provider.Context = .{
+                .gpa = gpa,
+                .path = m.path,
+                .io = io,
+                .environ_map = environ_map,
+            };
+            const facts = pacman.run(ctx) catch |err| blk: {
+                try output.printError(stderr_w, style, @errorName(err));
+                break :blk try gpa.alloc(provider.Fact, 0);
+            };
+            defer {
                 for (facts) |f| {
                     gpa.free(f.key);
                     gpa.free(f.value);
                 }
                 gpa.free(facts);
+            }
+            for (facts) |f| try output.printFact(stdout_w, style, f);
+        }
+
+        const has_binary = for (matches) |m| {
+            if (m.from_binary) break true;
+        } else false;
+        const is_bare_name = std.mem.indexOfScalar(u8, target, '/') == null;
+        const do_dual_query = !parse.options.search_libs
+            and is_bare_name
+            and (parse.options.search_all or !has_binary);
+        if (do_dual_query) {
+            const ctx2: provider.Context = .{
+                .gpa = gpa,
+                .path = target,
+                .io = io,
+                .environ_map = environ_map,
+            };
+            const facts2 = pacman.run(ctx2) catch |err| blk: {
+                try output.printError(stderr_w, style, @errorName(err));
+                break :blk try gpa.alloc(provider.Fact, 0);
+            };
+            defer {
+                for (facts2) |f| {
+                    gpa.free(f.key);
+                    gpa.free(f.value);
+                }
+                gpa.free(facts2);
+            }
+            if (facts2.len > 0) {
+                try stdout_w.writeByte('\n');
+                try output.printName(stdout_w, style, target, null);
+                for (facts2) |f| try output.printFact(stdout_w, style, f);
             }
         }
     }
@@ -166,6 +239,25 @@ fn parseArgs(args: []const []const u8, arena: std.mem.Allocator) !ParseResult {
     result.targets = targets.items;
     result.targets_list = targets;
     return result;
+}
+
+/// Returns the readlink target if `path` is a symlink, otherwise null.
+fn symlinkTarget(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
+    const linux = std.os.linux;
+    const path_z = std.posix.toPosixPath(path) catch return null;
+    var stx: linux.Statx = std.mem.zeroes(linux.Statx);
+    const rc = linux.statx(
+        linux.AT.FDCWD,
+        &path_z,
+        linux.AT.SYMLINK_NOFOLLOW,
+        .{ .TYPE = true },
+        &stx,
+    );
+    if (rc != 0) return null;
+    if ((stx.mode & linux.S.IFMT) != linux.S.IFLNK) return null;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.Io.Dir.cwd().readLink(io, path, &buf) catch return null;
+    return gpa.dupe(u8, buf[0..n]) catch null;
 }
 
 fn printUsage(writer: *std.Io.Writer) !void {

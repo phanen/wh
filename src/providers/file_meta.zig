@@ -1,4 +1,4 @@
-//! File metadata provider: type, size, permissions, owner, mtime.
+//! File metadata provider: perms, size, owner, mtime (one Stat fact).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -24,33 +24,6 @@ pub fn run(ctx: Context) anyerror![]Fact {
 
     const path_z = std.posix.toPosixPath(ctx.path) catch return try facts.toOwnedSlice(ctx.gpa);
 
-    // Detect symlink without following (so the link mode bits aren't reported).
-    var link_stx: linux.Statx = std.mem.zeroes(linux.Statx);
-    const link_rc = linux.statx(
-        linux.AT.FDCWD,
-        &path_z,
-        linux.AT.SYMLINK_NOFOLLOW,
-        .{ .TYPE = true, .MODE = true },
-        &link_stx,
-    );
-    const is_symlink = if (link_rc == 0)
-        (link_stx.mode & linux.S.IFMT) == linux.S.IFLNK
-    else
-        false;
-
-    if (is_symlink) {
-        var link_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const n = std.Io.Dir.cwd().readLink(ctx.io, ctx.path, &link_buf) catch
-            return try facts.toOwnedSlice(ctx.gpa);
-        const target = link_buf[0..n];
-        try facts.append(ctx.gpa, .{
-            .key = try ctx.gpa.dupe(u8, "Symlink"),
-            .value = try std.fmt.allocPrint(ctx.gpa, "{s} -> {s}", .{ ctx.path, target }),
-            .group = "file_meta",
-        });
-    }
-
-    // Stat the real file (follows symlinks when flags = 0).
     var stx: linux.Statx = std.mem.zeroes(linux.Statx);
     const rc = linux.statx(
         linux.AT.FDCWD,
@@ -71,36 +44,23 @@ pub fn run(ctx: Context) anyerror![]Fact {
     const type_mask: u16 = stx.mode & linux.S.IFMT;
     const type_char = fileTypeChar(type_mask);
 
-    try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Type"),
-        .value = try fileTypeString(ctx.gpa, type_mask),
-        .group = "file_meta",
-    });
-
-    try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Size"),
-        .value = try sizeString(ctx.gpa, stx.size),
-        .group = "file_meta",
-    });
-
     const perm_bits: u16 = stx.mode & 0o7777;
-    try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Perms"),
-        .value = try permsString(ctx.gpa, type_char, perm_bits),
-        .group = "file_meta",
+    const perms = try permsString(ctx.gpa, type_char, perm_bits);
+    defer ctx.gpa.free(perms);
+    const size = try sizeString(ctx.gpa, stx.size);
+    defer ctx.gpa.free(size);
+    const owner = try ownerString(ctx.gpa, stx.uid, stx.gid);
+    defer ctx.gpa.free(owner);
+    const mtime = try mtimeString(ctx.gpa, stx.mtime.sec);
+    defer ctx.gpa.free(mtime);
+
+    const stat_value = try std.fmt.allocPrint(ctx.gpa, "{s} {s} {s} {s}", .{
+        perms, size, owner, mtime,
     });
 
-    const owner_str = try ownerString(ctx.gpa, stx.uid, stx.gid);
     try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Owner"),
-        .value = owner_str,
-        .group = "file_meta",
-    });
-
-    try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Modified"),
-        .value = try mtimeString(ctx.gpa, stx.mtime.sec, stx.mtime.nsec),
-        .group = "file_meta",
+        .key = try ctx.gpa.dupe(u8, "Stat"),
+        .value = stat_value,
     });
 
     return try facts.toOwnedSlice(ctx.gpa);
@@ -124,27 +84,6 @@ fn fileTypeChar(type_mask: u16) u8 {
         's'
     else
         '?';
-}
-
-fn fileTypeString(allocator: std.mem.Allocator, type_mask: u16) ![]u8 {
-    const linux = std.os.linux;
-    const name: []const u8 = if (type_mask == linux.S.IFREG)
-        "regular file"
-    else if (type_mask == linux.S.IFDIR)
-        "directory"
-    else if (type_mask == linux.S.IFLNK)
-        "symbolic link"
-    else if (type_mask == linux.S.IFCHR)
-        "character device"
-    else if (type_mask == linux.S.IFBLK)
-        "block device"
-    else if (type_mask == linux.S.IFIFO)
-        "named pipe"
-    else if (type_mask == linux.S.IFSOCK)
-        "unix domain socket"
-    else
-        "unknown";
-    return allocator.dupe(u8, name);
 }
 
 fn sizeString(allocator: std.mem.Allocator, size: u64) ![]u8 {
@@ -218,44 +157,34 @@ fn permChar(cond: bool, c: u8) u8 {
 }
 
 fn ownerString(allocator: std.mem.Allocator, uid: u32, gid: u32) ![]u8 {
-    var user_buf: [16]u8 = undefined;
-    var group_buf: [16]u8 = undefined;
-    const user = lookupUser(uid, &user_buf);
-    const group = lookupGroup(gid, &group_buf);
+    const user = lookupUser(allocator, uid);
+    const group = lookupGroup(allocator, gid);
     return std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, group });
 }
 
-fn lookupUser(uid: u32, buf: *[16]u8) []u8 {
+fn lookupUser(allocator: std.mem.Allocator, uid: u32) []const u8 {
     if (builtin.link_libc) {
         const pw = std.c.getpwuid(uid);
         if (pw) |p| if (p.name) |n| {
-            const name = std.mem.span(n);
-            if (name.len <= buf.len) {
-                @memcpy(buf, name);
-                return buf[0..name.len];
-            }
+            return std.mem.span(n);
         };
     }
-    const len = std.fmt.printInt(buf, uid, 10, .lower, .{});
-    return buf[0..len];
+    _ = allocator;
+    return "unknown";
 }
 
-fn lookupGroup(gid: u32, buf: *[16]u8) []u8 {
+fn lookupGroup(allocator: std.mem.Allocator, gid: u32) []const u8 {
     if (builtin.link_libc) {
         const gr = std.c.getgrgid(gid);
         if (gr) |g| if (g.name) |n| {
-            const name = std.mem.span(n);
-            if (name.len <= buf.len) {
-                @memcpy(buf, name);
-                return buf[0..name.len];
-            }
+            return std.mem.span(n);
         };
     }
-    const len = std.fmt.printInt(buf, gid, 10, .lower, .{});
-    return buf[0..len];
+    _ = allocator;
+    return "unknown";
 }
 
-fn mtimeString(allocator: std.mem.Allocator, sec: i64, nsec: u32) ![]u8 {
+fn mtimeString(allocator: std.mem.Allocator, sec: i64) ![]u8 {
     const secs: u64 = if (sec < 0) 0 else @intCast(sec);
     const epoch = std.time.epoch.EpochSeconds{ .secs = secs };
     const day = epoch.getEpochDay();
@@ -268,7 +197,7 @@ fn mtimeString(allocator: std.mem.Allocator, sec: i64, nsec: u32) ![]u8 {
     };
     return std.fmt.allocPrint(
         allocator,
-        "{d:0>4}-{s}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}.{d:0>9}",
+        "{d:0>4}-{s}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}",
         .{
             year_day.year,
             months[@intFromEnum(month_day.month) - 1],
@@ -276,7 +205,6 @@ fn mtimeString(allocator: std.mem.Allocator, sec: i64, nsec: u32) ![]u8 {
             day_secs.getHoursIntoDay(),
             day_secs.getMinutesIntoHour(),
             day_secs.getSecondsIntoMinute(),
-            nsec,
         },
     );
 }

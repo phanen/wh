@@ -1,11 +1,8 @@
 //! ELF file parsing: headers, dynamic section, string tables.
-//!
-//! Provides both low-level header/section reading and a higher-level
-//! `ParsedElf` value that materializes interpreter, section info,
-//! dynamic entries, and the `.dynstr` string table.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const util = @import("util.zig");
 
 pub const ParseError = error{
     NotElf,
@@ -92,25 +89,24 @@ pub const ParsedElf = struct {
     }
 };
 
-/// Maximum file size accepted by `parseFile` / `parseFromBytes`.
 pub const max_file_size: usize = 100 * 1024 * 1024;
 
-/// Parse an ELF file from disk. Reads the entire file into memory first.
 pub fn parseFile(
     allocator: std.mem.Allocator,
     io: std.Io,
     path: []const u8,
 ) ParseError!ParsedElf {
-    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size)) catch
-        return ParseError.NotElf;
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_file_size)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return ParseError.NotElf,
+    };
     return parseFromBytes(allocator, data) catch |err| {
         allocator.free(data);
         return err;
     };
 }
 
-/// Parse ELF data from an in-memory buffer. Caller transfers ownership of
-/// `data` to the returned `ParsedElf` (use `deinit` to free it).
+/// Caller transfers ownership of `data` to the returned `ParsedElf`.
 pub fn parseFromBytes(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -139,8 +135,8 @@ pub fn parseFromBytes(
         if (phdr.p_type != std.elf.PT_INTERP) continue;
         const off: usize = @intCast(phdr.p_offset);
         const sz: usize = @intCast(phdr.p_filesz);
-        if (off + sz > data.len) continue;
-        interp = cstr(data[off .. off + sz]);
+        if (off > data.len or sz > data.len - off) continue;
+        interp = util.cstr(data[off .. off + sz]);
     }
 
     var sh_iter = header.iterateSectionHeadersBuffer(data);
@@ -156,7 +152,8 @@ pub fn parseFromBytes(
     const shstr_shdr = raw_shdrs.items[shstrndx];
     const shstr_off: usize = @intCast(shstr_shdr.sh_offset);
     const shstr_sz: usize = @intCast(shstr_shdr.sh_size);
-    if (shstr_off + shstr_sz > data.len) return ParseError.InvalidSectionHeader;
+    if (shstr_off > data.len or shstr_sz > data.len - shstr_off)
+        return ParseError.InvalidSectionHeader;
     const shstrtab = data[shstr_off .. shstr_off + shstr_sz];
 
     var sections: std.ArrayList(SectionInfo) = .empty;
@@ -166,7 +163,7 @@ pub fn parseFromBytes(
         const shdr = raw_shdrs.items[i];
         const name_off: usize = @intCast(shdr.sh_name);
         if (name_off >= shstrtab.len) return ParseError.InvalidSectionHeader;
-        const name = cstr(shstrtab[name_off..]);
+        const name = util.cstr(shstrtab[name_off..]);
         try sections.append(allocator, .{
             .name = name,
             .type = shdr.sh_type,
@@ -221,19 +218,12 @@ pub fn parseFromBytes(
     };
 }
 
-fn cstr(s: []const u8) []const u8 {
-    const zero = std.mem.indexOfScalar(u8, s, 0) orelse s.len;
-    return s[0..zero];
-}
-
 fn dynstrLookup(dynstr: []const u8, offset: u64) []const u8 {
     if (offset >= dynstr.len) return "";
-    return cstr(dynstr[@intCast(offset)..]);
+    return util.cstr(dynstr[@intCast(offset)..]);
 }
 
-/// Read an entire file using raw POSIX syscalls. Test-only helper that
-/// avoids the `std.Io` requirement.
-pub fn readFilePosix(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+fn readFilePosix(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (builtin.os.tag != .linux) return error.UnsupportedOs;
     const linux = std.os.linux;
     const path_z = try std.posix.toPosixPath(path);
@@ -331,14 +321,14 @@ test "elf_parse: cstr helper" {
     @memcpy(buf1[0..5], "hello");
     buf1[5] = 0;
     @memcpy(buf1[6..11], "world");
-    try std.testing.expectEqualStrings("hello", cstr(buf1[0..11]));
+    try std.testing.expectEqualStrings("hello", util.cstr(buf1[0..11]));
 
     var buf2: [8]u8 = undefined;
     @memcpy(buf2[0..5], "plain");
-    try std.testing.expectEqualStrings("plain", cstr(buf2[0..5]));
+    try std.testing.expectEqualStrings("plain", util.cstr(buf2[0..5]));
 
     var buf3: [8]u8 = undefined;
     buf3[0] = 0;
     @memcpy(buf3[1..6], "stuff");
-    try std.testing.expectEqualStrings("", cstr(buf3[0..6]));
+    try std.testing.expectEqualStrings("", util.cstr(buf3[0..6]));
 }

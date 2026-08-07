@@ -43,14 +43,12 @@ pub fn run(ctx: Context) anyerror![]Fact {
     try facts.append(ctx.gpa, .{
         .key = try ctx.gpa.dupe(u8, "ELF"),
         .value = try ctx.gpa.dupe(u8, line),
-        .group = "elf_info",
     });
 
     if (parsed.interp) |interp| {
         try facts.append(ctx.gpa, .{
             .key = try ctx.gpa.dupe(u8, "Interpreter"),
             .value = try ctx.gpa.dupe(u8, interp),
-            .group = "elf_info",
         });
     }
 

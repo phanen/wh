@@ -1,17 +1,8 @@
 //! ELF dependency resolution provider (ldd replacement).
-//!
-//! Resolves each `DT_NEEDED` SONAME to a real path on disk using:
-//!  1. DT_RPATH (if DT_RUNPATH absent)
-//!  2. LD_LIBRARY_PATH
-//!  3. DT_RUNPATH
-//!  4. /etc/ld.so.cache
-//!  5. System default paths (/lib, /lib64, /usr/lib, /usr/lib64)
-//!
-//! Only DIRECT dependencies are resolved. Transitive resolution would
-//! require recursively parsing each found library.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const util = @import("../util.zig");
 const provider = @import("../provider.zig");
 const elf_parse = @import("../elf_parse.zig");
 const ld_cache = @import("../ld_cache.zig");
@@ -76,13 +67,11 @@ pub fn run(ctx: Context) anyerror![]Fact {
     try facts.append(ctx.gpa, .{
         .key = try ctx.gpa.dupe(u8, "Deps"),
         .value = try value_buf.toOwnedSlice(ctx.gpa),
-        .group = "elf_deps",
     });
 
     return try facts.toOwnedSlice(ctx.gpa);
 }
 
-/// Map resolved paths to ldd-style labels for special cases (vDSO, etc).
 fn describeDep(soname: []const u8, path: []const u8) []const u8 {
     if (std.mem.indexOf(u8, soname, "vdso") != null and std.mem.eql(u8, path, "not found"))
         return "(vdso)";
@@ -102,7 +91,7 @@ fn resolveSoname(
     cache_opt: ?*const ld_cache.LdCache,
 ) ResolvedPath {
     if (std.mem.indexOfScalar(u8, soname, '/') != null) {
-        if (fileExists(soname)) return .{ .path = soname, .must_free = false };
+        if (util.fileExists(soname)) return .{ .path = soname, .must_free = false };
         return .{ .path = "not found", .must_free = false };
     }
 
@@ -131,15 +120,13 @@ fn resolveSoname(
 
     for (system_paths) |dir| {
         const full = std.fs.path.join(ctx.gpa, &[_][]const u8{ dir, soname }) catch continue;
-        if (fileExists(full)) return .{ .path = full, .must_free = true };
+        if (util.fileExists(full)) return .{ .path = full, .must_free = true };
         ctx.gpa.free(full);
     }
 
     return .{ .path = "not found", .must_free = false };
 }
 
-/// Expand `$ORIGIN` and `$LIB` tokens in rpath/runpath strings.
-/// Returns the original slice if no tokens are present (no allocation).
 fn expandTokens(
     allocator: std.mem.Allocator,
     input: []const u8,
@@ -195,20 +182,10 @@ fn trySearchDirs(ctx: Context, soname: []const u8, dir_list: []const u8) ?[]cons
     while (it.next()) |dir| {
         if (dir.len == 0) continue;
         const full = std.fs.path.join(ctx.gpa, &[_][]const u8{ dir, soname }) catch continue;
-        if (fileExists(full)) return full;
+        if (util.fileExists(full)) return full;
         ctx.gpa.free(full);
     }
     return null;
-}
-
-fn fileExists(path: []const u8) bool {
-    if (builtin.os.tag != .linux) return false;
-    const linux = std.os.linux;
-    const path_z = std.posix.toPosixPath(path) catch return false;
-    var stx: linux.Statx = std.mem.zeroes(linux.Statx);
-    const rc = linux.statx(linux.AT.FDCWD, &path_z, 0, .{ .MODE = true }, &stx);
-    if (linux.errno(rc) != .SUCCESS) return false;
-    return (stx.mode & linux.S.IFMT) == linux.S.IFREG;
 }
 
 test "elf_deps: describeDep maps vDSO" {
