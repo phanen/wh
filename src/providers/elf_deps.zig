@@ -8,6 +8,7 @@ const elf_parse = @import("../elf_parse.zig");
 const ld_cache = @import("../ld_cache.zig");
 const Context = provider.Context;
 const Fact = provider.Fact;
+const key = provider.fact_key;
 
 const system_paths = [_][]const u8{
     "/lib",
@@ -16,15 +17,9 @@ const system_paths = [_][]const u8{
     "/usr/lib64",
 };
 
-pub fn run(ctx: Context) anyerror![]Fact {
+pub fn run(ctx: Context) ![]Fact {
     var facts: std.ArrayList(Fact) = .empty;
-    errdefer {
-        for (facts.items) |f| {
-            ctx.gpa.free(f.key);
-            ctx.gpa.free(f.value);
-        }
-        facts.deinit(ctx.gpa);
-    }
+    errdefer provider.deinitFacts(ctx.gpa, &facts);
 
     var parsed = elf_parse.parseFile(ctx.gpa, ctx.io, ctx.path) catch
         return try facts.toOwnedSlice(ctx.gpa);
@@ -39,10 +34,10 @@ pub fn run(ctx: Context) anyerror![]Fact {
     const rpath = parsed.getRpath();
     const runpath = parsed.getRunpath();
 
-    var cache: ld_cache.LdCache = undefined;
+    var cache: ld_cache.LDCache = undefined;
     var cache_loaded = false;
     defer if (cache_loaded) cache.deinit(ctx.gpa);
-    if (ld_cache.LdCache.load(ctx.gpa, ctx.io)) |c| {
+    if (ld_cache.LDCache.load(ctx.gpa, ctx.io)) |c| {
         cache = c;
         cache_loaded = true;
     } else |_| {
@@ -65,7 +60,7 @@ pub fn run(ctx: Context) anyerror![]Fact {
     if (value_buf.items.len == 0) return try facts.toOwnedSlice(ctx.gpa);
 
     try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Deps"),
+        .key = try ctx.gpa.dupe(u8, key.deps),
         .value = try value_buf.toOwnedSlice(ctx.gpa),
     });
 
@@ -88,7 +83,7 @@ fn resolveSoname(
     soname: []const u8,
     rpath: ?[]const u8,
     runpath: ?[]const u8,
-    cache_opt: ?*const ld_cache.LdCache,
+    cache_opt: ?*const ld_cache.LDCache,
 ) ResolvedPath {
     if (std.mem.indexOfScalar(u8, soname, '/') != null) {
         if (util.fileExists(soname)) return .{ .path = soname, .must_free = false };
@@ -119,7 +114,7 @@ fn resolveSoname(
     }
 
     for (system_paths) |dir| {
-        const full = std.fs.path.join(ctx.gpa, &[_][]const u8{ dir, soname }) catch continue;
+        const full = std.fs.path.join(ctx.gpa, &.{ dir, soname }) catch continue;
         if (util.fileExists(full)) return .{ .path = full, .must_free = true };
         ctx.gpa.free(full);
     }
@@ -178,10 +173,9 @@ fn expandTokens(
 }
 
 fn trySearchDirs(ctx: Context, soname: []const u8, dir_list: []const u8) ?[]const u8 {
-    var it = std.mem.splitScalar(u8, dir_list, ':');
+    var it = std.mem.tokenizeScalar(u8, dir_list, ':');
     while (it.next()) |dir| {
-        if (dir.len == 0) continue;
-        const full = std.fs.path.join(ctx.gpa, &[_][]const u8{ dir, soname }) catch continue;
+        const full = std.fs.path.join(ctx.gpa, &.{ dir, soname }) catch continue;
         if (util.fileExists(full)) return full;
         ctx.gpa.free(full);
     }

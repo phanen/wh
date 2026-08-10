@@ -1,31 +1,34 @@
 //! Pacman sync DB provider (-F).
 
 const std = @import("std");
-const util = @import("../util.zig");
-const provider = @import("../provider.zig");
+const util = @import("../../util.zig");
+const provider = @import("../../provider.zig");
 const Context = provider.Context;
 const Fact = provider.Fact;
 
 const sync_dir = "/var/lib/pacman/sync";
 const max_read_size: usize = 256 * 1024 * 1024;
+const max_tar_entries: usize = 10_000_000;
 
 pub const PkgMatch = struct {
     name: []const u8,
     version: []const u8,
     repo: []const u8,
     filepath: []const u8,
+
+    pub fn free(self: PkgMatch, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.version);
+        allocator.free(self.repo);
+        allocator.free(self.filepath);
+    }
 };
 
-pub fn run(ctx: Context) anyerror![]PkgMatch {
+pub fn run(ctx: Context) ![]PkgMatch {
     var results: std.ArrayList(PkgMatch) = .empty;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
-        for (results.items) |m| {
-            ctx.gpa.free(m.name);
-            ctx.gpa.free(m.version);
-            ctx.gpa.free(m.repo);
-            ctx.gpa.free(m.filepath);
-        }
+        for (results.items) |m| m.free(ctx.gpa);
         results.deinit(ctx.gpa);
         var it = seen.iterator();
         while (it.next()) |e| ctx.gpa.free(e.key_ptr.*);
@@ -98,7 +101,7 @@ fn searchOneDb(
     target: []const u8,
     repo: []const u8,
 ) ![]PkgMatch {
-    const db_path = try std.fs.path.join(ctx.gpa, &[_][]const u8{ sync_dir, db_filename });
+    const db_path = try std.fs.path.join(ctx.gpa, &.{ sync_dir, db_filename });
     defer ctx.gpa.free(db_path);
 
     const compressed = std.Io.Dir.cwd().readFileAlloc(
@@ -143,53 +146,38 @@ fn searchTar(
         matched_list.deinit(allocator);
     }
 
-    var header_buf: [512]u8 = undefined;
+    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(reader, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
+    });
 
-    while (true) {
-        reader.readSliceAll(&header_buf) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => |e| return e,
-        };
+    var entry_count: usize = 0;
+    while (try it.next()) |file| : (entry_count += 1) {
+        if (entry_count >= max_tar_entries) return error.TooManyTarEntries;
 
-        if (isZeroBlock(&header_buf)) break;
+        if (file.kind != .file) continue;
+        if (file.size == 0) continue;
 
-        const name_end = std.mem.indexOfScalar(u8, header_buf[0..100], 0) orelse 100;
-        if (name_end == 0) break;
-        const name = header_buf[0..name_end];
+        var entry_data: std.Io.Writer.Allocating = .init(allocator);
+        defer entry_data.deinit();
+        try it.streamRemaining(file, &entry_data.writer);
+        const data = entry_data.written();
 
-        const size = tarOctal(header_buf[124..136]) orelse 0;
-        const type_flag = header_buf[156];
-
-        if (type_flag != '0') {
-            skipPadding(reader, size) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => |e| return e,
-            };
-            continue;
-        }
-
-        var data_buf: std.ArrayList(u8) = .empty;
-        defer data_buf.deinit(allocator);
-        if (size > 0) {
-            try data_buf.resize(allocator, size);
-            reader.readSliceAll(data_buf.items) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => |e| return e,
-            };
-        }
-
-        if (std.mem.endsWith(u8, name, "/desc")) {
-            const prefix = name[0 .. name.len - 5];
-            const name_val = util.parseDescField(data_buf.items, "NAME", allocator) orelse
+        if (std.mem.endsWith(u8, file.name, "/desc")) {
+            const prefix = file.name[0 .. file.name.len - 5];
+            const name_val = util.parseDescField(data, "NAME", allocator) orelse
                 try allocator.dupe(u8, prefix);
-            const version_val = util.parseDescField(data_buf.items, "VERSION", allocator) orelse
+            errdefer allocator.free(name_val);
+
+            const version_val = util.parseDescField(data, "VERSION", allocator) orelse
                 try allocator.dupe(u8, "");
+            errdefer allocator.free(version_val);
+
             const key = try allocator.dupe(u8, prefix);
-            errdefer {
-                allocator.free(name_val);
-                allocator.free(version_val);
-                allocator.free(key);
-            }
+            errdefer allocator.free(key);
+
             const gop = try info_map.getOrPut(allocator, key);
             if (gop.found_existing) {
                 allocator.free(name_val);
@@ -198,9 +186,9 @@ fn searchTar(
             } else {
                 gop.value_ptr.* = .{ .name = name_val, .version = version_val };
             }
-        } else if (std.mem.endsWith(u8, name, "/files")) {
-            if (util.matchFind(target, data_buf.items)) |matched_path| {
-                const prefix = try allocator.dupe(u8, name[0 .. name.len - 6]);
+        } else if (std.mem.endsWith(u8, file.name, "/files")) {
+            if (util.matchFind(target, data)) |matched_path| {
+                const prefix = try allocator.dupe(u8, file.name[0 .. file.name.len - 6]);
                 errdefer allocator.free(prefix);
                 try matched_list.append(allocator, .{
                     .prefix = prefix,
@@ -208,11 +196,6 @@ fn searchTar(
                 });
             }
         }
-
-        skipPadding(reader, size) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => |e| return e,
-        };
     }
 
     var results: std.ArrayList(PkgMatch) = .empty;
@@ -230,28 +213,6 @@ fn searchTar(
     return try results.toOwnedSlice(allocator);
 }
 
-fn skipPadding(reader: *std.Io.Reader, size: usize) !void {
-    const padding = (512 - (size % 512)) % 512;
-    if (padding > 0) {
-        _ = try reader.discard(.limited(padding));
-    }
-}
-
-fn isZeroBlock(buf: *const [512]u8) bool {
-    for (buf) |b| if (b != 0) return false;
-    return true;
-}
-
-fn tarOctal(raw: *const [12]u8) ?usize {
-    var result: usize = 0;
-    for (raw) |c| {
-        if (c == 0 or c == ' ') continue;
-        if (c < '0' or c > '7') return null;
-        result = result * 8 + (c - '0');
-    }
-    return result;
-}
-
 test "pacrepo: parseDbName splits suffixes" {
     {
         const p = parseDbName("core.db").?;
@@ -262,23 +223,6 @@ test "pacrepo: parseDbName splits suffixes" {
         try std.testing.expectEqualStrings("extra", p.repo);
     }
     try std.testing.expect(parseDbName("core.pacfiles") == null);
-}
-
-test "pacrepo: tarOctal parses octal fields" {
-    var f: [12]u8 = .{ '0', '0', '0', '0', '0', '0', '1', '0', '0', '0', ' ', 0 };
-    try std.testing.expectEqual(@as(usize, 512), tarOctal(&f).?);
-    var z: [12]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    try std.testing.expectEqual(@as(usize, 0), tarOctal(&z).?);
-    var bad: [12]u8 = .{ ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', 'x', 0 };
-    try std.testing.expect(tarOctal(&bad) == null);
-}
-
-test "pacrepo: isZeroBlock detects end-of-archive" {
-    var zero: [512]u8 = [_]u8{0} ** 512;
-    try std.testing.expect(isZeroBlock(&zero));
-    var non_zero: [512]u8 = [_]u8{0} ** 512;
-    non_zero[100] = 'a';
-    try std.testing.expect(!isZeroBlock(&non_zero));
 }
 
 test "pacrepo: fileContains finds matches in %FILES% section" {
@@ -320,7 +264,7 @@ test "pacrepo: parseDescField extracts NAME and VERSION" {
     try std.testing.expect(util.parseDescField(data, "SIZE", allocator) == null);
 }
 
-test "pacrepo: searchTar finds package from synthetic gzip stream" {
+test "pacrepo: searchTar finds package from synthetic tar stream" {
     const allocator = std.testing.allocator;
 
     const desc_data =
@@ -339,50 +283,16 @@ test "pacrepo: searchTar finds package from synthetic gzip stream" {
         \\
     ;
 
-    var tar_buf: std.ArrayList(u8) = .empty;
-    defer tar_buf.deinit(allocator);
+    var tar_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer tar_buf.deinit();
 
-    {
-        var header: [512]u8 = [_]u8{0} ** 512;
-        const name = "demo-1.2.3-4/desc";
-        @memcpy(header[0..name.len], name);
-        const size: usize = desc_data.len;
-        var i: usize = 11;
-        var s = size;
-        while (i > 0) {
-            i -= 1;
-            header[124 + i] = @intCast('0' + @as(u8, @intCast(s & 0x7)));
-            s >>= 3;
-        }
-        header[156] = '0';
-        try tar_buf.appendSlice(allocator, &header);
-        try tar_buf.appendSlice(allocator, desc_data);
-        const pad = (512 - (size % 512)) % 512;
-        try tar_buf.appendNTimes(allocator, 0, pad);
-    }
+    var tar: std.tar.Writer = .{ .underlying_writer = &tar_buf.writer };
+    try tar.writeFileBytes("demo-1.2.3-4/desc", desc_data, .{});
+    try tar.writeFileBytes("demo-1.2.3-4/files", files_data, .{});
+    // End-of-archive: two zero blocks.
+    try tar_buf.writer.splatByteAll(0, 1024);
 
-    {
-        var header: [512]u8 = [_]u8{0} ** 512;
-        const name = "demo-1.2.3-4/files";
-        @memcpy(header[0..name.len], name);
-        const size: usize = files_data.len;
-        var i: usize = 11;
-        var s = size;
-        while (i > 0) {
-            i -= 1;
-            header[124 + i] = @intCast('0' + @as(u8, @intCast(s & 0x7)));
-            s >>= 3;
-        }
-        header[156] = '0';
-        try tar_buf.appendSlice(allocator, &header);
-        try tar_buf.appendSlice(allocator, files_data);
-        const pad = (512 - (size % 512)) % 512;
-        try tar_buf.appendNTimes(allocator, 0, pad);
-    }
-
-    try tar_buf.appendNTimes(allocator, 0, 1024);
-
-    var reader: std.Io.Reader = .fixed(tar_buf.items);
+    var reader: std.Io.Reader = .fixed(tar_buf.written());
     const results = try searchTar(&reader, "usr/bin/demo", "testrepo", allocator);
     defer {
         for (results) |r| {

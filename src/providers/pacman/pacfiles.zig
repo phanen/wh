@@ -1,8 +1,8 @@
 //! Pacfiles provider.
 
 const std = @import("std");
-const provider = @import("../provider.zig");
-const plocate = @import("../plocate.zig");
+const provider = @import("../../provider.zig");
+const plocate = @import("plocate");
 const Context = provider.Context;
 
 pub fn run(ctx: Context) ![]plocate.PacfilesMatch {

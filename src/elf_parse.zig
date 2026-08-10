@@ -155,6 +155,8 @@ pub fn parseFromBytes(
     if (shstr_off > data.len or shstr_sz > data.len - shstr_off)
         return ParseError.InvalidSectionHeader;
     const shstrtab = data[shstr_off .. shstr_off + shstr_sz];
+    if (shstrtab.len == 0 or shstrtab[shstrtab.len - 1] != 0)
+        return ParseError.InvalidSectionHeader;
 
     var sections: std.ArrayList(SectionInfo) = .empty;
     errdefer sections.deinit(allocator);
@@ -223,49 +225,11 @@ fn dynstrLookup(dynstr: []const u8, offset: u64) []const u8 {
     return util.cstr(dynstr[@intCast(offset)..]);
 }
 
-fn readFilePosix(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    if (builtin.os.tag != .linux) return error.UnsupportedOs;
-    const linux = std.os.linux;
-    const path_z = try std.posix.toPosixPath(path);
-    const fd_rc = linux.open(&path_z, .{ .ACCMODE = .RDONLY }, 0);
-    if (linux.errno(fd_rc) != .SUCCESS) return error.FileOpenFailed;
-    const fd: i32 = @intCast(fd_rc);
-    defer _ = linux.close(fd);
-
-    var stx: linux.Statx = std.mem.zeroes(linux.Statx);
-    const statx_rc = linux.statx(
-        fd,
-        "",
-        linux.AT.EMPTY_PATH,
-        .{ .SIZE = true },
-        &stx,
-    );
-    if (linux.errno(statx_rc) != .SUCCESS) return error.StatFailed;
-    const size: usize = @intCast(stx.size);
-
-    const buf = try allocator.alloc(u8, size);
-    errdefer allocator.free(buf);
-    var total: usize = 0;
-    while (total < size) {
-        const n_rc = linux.read(fd, buf.ptr + total, size - total);
-        switch (linux.errno(n_rc)) {
-            .SUCCESS => {
-                const n: usize = n_rc;
-                if (n == 0) break;
-                total += n;
-            },
-            .INTR => continue,
-            else => return error.ReadFailed,
-        }
-    }
-    return buf[0..total];
-}
-
 test "elf_parse: parse /usr/bin/ls" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const data = try readFilePosix(allocator, "/usr/bin/ls");
-    var parsed = try parseFromBytes(allocator, data);
+
+    var parsed = try parseFile(allocator, std.testing.io, "/usr/bin/ls");
     defer parsed.deinit(allocator);
 
     try std.testing.expect(parsed.header.is_64);
@@ -291,8 +255,8 @@ test "elf_parse: parse /usr/bin/ls" {
 test "elf_parse: find .dynstr and .dynamic sections" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const allocator = std.testing.allocator;
-    const data = try readFilePosix(allocator, "/usr/bin/ls");
-    var parsed = try parseFromBytes(allocator, data);
+
+    var parsed = try parseFile(allocator, std.testing.io, "/usr/bin/ls");
     defer parsed.deinit(allocator);
 
     try std.testing.expect(parsed.findSection(".dynstr") != null);

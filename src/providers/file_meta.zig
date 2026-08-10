@@ -5,16 +5,11 @@ const builtin = @import("builtin");
 const provider = @import("../provider.zig");
 const Context = provider.Context;
 const Fact = provider.Fact;
+const key = provider.fact_key;
 
-pub fn run(ctx: Context) anyerror![]Fact {
+pub fn run(ctx: Context) ![]Fact {
     var facts: std.ArrayList(Fact) = .empty;
-    errdefer {
-        for (facts.items) |f| {
-            ctx.gpa.free(f.key);
-            ctx.gpa.free(f.value);
-        }
-        facts.deinit(ctx.gpa);
-    }
+    errdefer provider.deinitFacts(ctx.gpa, &facts);
 
     const linux = std.os.linux;
 
@@ -59,7 +54,7 @@ pub fn run(ctx: Context) anyerror![]Fact {
     });
 
     try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "Stat"),
+        .key = try ctx.gpa.dupe(u8, key.stat),
         .value = stat_value,
     });
 
@@ -88,35 +83,17 @@ fn fileTypeChar(type_mask: u16) u8 {
 
 fn sizeString(allocator: std.mem.Allocator, size: u64) ![]u8 {
     const k: u64 = 1024;
-    const m: u64 = k * 1024;
-    const g: u64 = m * 1024;
-    const t: u64 = g * 1024;
-
-    if (size >= t) {
-        const whole = size / t;
-        const rem1 = size - whole * t;
-        const frac = rem1 * 10 / t;
-        return std.fmt.allocPrint(allocator, "{d}.{d} TiB", .{ whole, frac });
+    const units = [_][]const u8{ "B", "KiB", "MiB", "GiB", "TiB" };
+    var unit_idx: usize = 0;
+    var scaled: u64 = size;
+    while (scaled >= k and unit_idx + 1 < units.len) : (unit_idx += 1) {
+        scaled = @divTrunc(scaled, k);
     }
-    if (size >= g) {
-        const whole = size / g;
-        const rem1 = size - whole * g;
-        const frac = rem1 * 10 / g;
-        return std.fmt.allocPrint(allocator, "{d}.{d} GiB", .{ whole, frac });
-    }
-    if (size >= m) {
-        const whole = size / m;
-        const rem1 = size - whole * m;
-        const frac = rem1 * 10 / m;
-        return std.fmt.allocPrint(allocator, "{d}.{d} MiB", .{ whole, frac });
-    }
-    if (size >= k) {
-        const whole = size / k;
-        const rem1 = size - whole * k;
-        const frac = rem1 * 10 / k;
-        return std.fmt.allocPrint(allocator, "{d}.{d} KiB", .{ whole, frac });
-    }
-    return std.fmt.allocPrint(allocator, "{d} B", .{size});
+    if (unit_idx == 0) return std.fmt.allocPrint(allocator, "{d} B", .{size});
+    const unit: u64 = k << @intCast((unit_idx - 1) * 10);
+    const whole = size / unit;
+    const frac = (size - whole * unit) * 10 / unit;
+    return std.fmt.allocPrint(allocator, "{d}.{d} {s}", .{ whole, frac, units[unit_idx] });
 }
 
 fn permsString(
@@ -157,30 +134,28 @@ fn permChar(cond: bool, c: u8) u8 {
 }
 
 fn ownerString(allocator: std.mem.Allocator, uid: u32, gid: u32) ![]u8 {
-    const user = lookupUser(allocator, uid);
-    const group = lookupGroup(allocator, gid);
+    const user = lookupUser(uid);
+    const group = lookupGroup(gid);
     return std.fmt.allocPrint(allocator, "{s}:{s}", .{ user, group });
 }
 
-fn lookupUser(allocator: std.mem.Allocator, uid: u32) []const u8 {
+fn lookupUser(uid: u32) []const u8 {
     if (builtin.link_libc) {
         const pw = std.c.getpwuid(uid);
         if (pw) |p| if (p.name) |n| {
             return std.mem.span(n);
         };
     }
-    _ = allocator;
     return "unknown";
 }
 
-fn lookupGroup(allocator: std.mem.Allocator, gid: u32) []const u8 {
+fn lookupGroup(gid: u32) []const u8 {
     if (builtin.link_libc) {
         const gr = std.c.getgrgid(gid);
         if (gr) |g| if (g.name) |n| {
             return std.mem.span(n);
         };
     }
-    _ = allocator;
     return "unknown";
 }
 

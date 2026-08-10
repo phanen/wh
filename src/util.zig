@@ -4,31 +4,19 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn cstr(s: []const u8) []const u8 {
-    const zero = std.mem.indexOfScalar(u8, s, 0) orelse s.len;
-    return s[0..zero];
+    return std.mem.sliceTo(s, 0);
 }
 
 pub fn pathBaseMatches(path: []const u8, name: []const u8) bool {
+    // NOTE: kept in sync with `plocate/src/util.zig::pathBaseMatches`.
+    // The two implementations live in separate packages with no shared code,
+    // so any behavior change here must be mirrored in plocate manually.
     const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return false;
     return std.mem.eql(u8, path[slash + 1 ..], name);
 }
 
 pub fn fileContains(target: []const u8, data: []const u8) bool {
-    const bare = std.mem.indexOfScalar(u8, target, '/') == null;
-    var lines = std.mem.splitScalar(u8, data, '\n');
-    var in_files = false;
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len >= 2 and trimmed[0] == '%' and trimmed[trimmed.len - 1] == '%') {
-            in_files = std.mem.eql(u8, trimmed, "%FILES%");
-            continue;
-        }
-        if (in_files and trimmed.len > 0) {
-            if (std.mem.eql(u8, trimmed, target)) return true;
-            if (bare and pathBaseMatches(trimmed, target)) return true;
-        }
-    }
-    return false;
+    return matchFind(target, data) != null;
 }
 
 pub fn parseDescField(data: []const u8, key: []const u8, allocator: std.mem.Allocator) ?[]u8 {

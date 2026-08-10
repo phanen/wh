@@ -3,6 +3,18 @@
 const std = @import("std");
 const provider = @import("provider.zig");
 const Fact = provider.Fact;
+const key = provider.fact_key;
+
+// ANSI escape sequences used in multiple call sites. Single-use sequences stay inline.
+const ansi_reset: []const u8 = "\x1b[0m";
+const ansi_dim: []const u8 = "\x1b[2m";
+const ansi_red: []const u8 = "\x1b[31m";
+const ansi_green: []const u8 = "\x1b[32m";
+const ansi_yellow: []const u8 = "\x1b[33m";
+const ansi_cyan: []const u8 = "\x1b[36m";
+const ansi_white: []const u8 = "\x1b[37m";
+const ansi_bold_cyan: []const u8 = "\x1b[1;36m";
+const ansi_bold_white: []const u8 = "\x1b[1;37m";
 
 pub const Style = struct {
     color: bool,
@@ -19,11 +31,11 @@ pub fn printFact(
     style: Style,
     fact: Fact,
 ) !void {
-    if (std.mem.eql(u8, fact.key, "Pkg")) {
+    if (std.mem.eql(u8, fact.key, key.pkg)) {
         try printPkg(writer, style, fact.value);
         return;
     }
-    if (std.mem.eql(u8, fact.key, "Stat")) {
+    if (std.mem.eql(u8, fact.key, key.stat)) {
         try printStat(writer, style, fact.value);
         return;
     }
@@ -33,9 +45,9 @@ pub fn printFact(
     }
 
     try writer.writeAll("  ");
-    if (style.color) try writer.writeAll("\x1b[2m");
+    if (style.color) try writer.writeAll(ansi_dim);
     try writer.print("{s}:", .{fact.key});
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     try writer.writeAll(" ");
 
     try writer.writeAll(fact.value);
@@ -51,7 +63,7 @@ pub fn printError(
     try writer.writeAll("error: ");
     try writer.writeAll(message);
     try writer.writeAll("\n");
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
 }
 
 pub fn printName(
@@ -61,20 +73,20 @@ pub fn printName(
     target: ?[]const u8,
 ) !void {
     try writer.writeAll("  ");
-    if (style.color) try writer.writeAll("\x1b[2m");
+    if (style.color) try writer.writeAll(ansi_dim);
     try writer.writeAll("Name:");
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     try writer.writeAll(" ");
-    if (style.color) try writer.writeAll("\x1b[1;36m");
+    if (style.color) try writer.writeAll(ansi_bold_cyan);
     try writer.writeAll(path);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     if (target) |t| {
-        if (style.color) try writer.writeAll("\x1b[2m");
+        if (style.color) try writer.writeAll(ansi_dim);
         try writer.writeAll(" -> ");
-        if (style.color) try writer.writeAll("\x1b[0m");
-        if (style.color) try writer.writeAll("\x1b[1;36m");
+        if (style.color) try writer.writeAll(ansi_reset);
+        if (style.color) try writer.writeAll(ansi_bold_cyan);
         try writer.writeAll(t);
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
     }
     try writer.writeAll("\n");
 }
@@ -84,13 +96,13 @@ fn printMultilineFact(
     style: Style,
     fact: Fact,
 ) !void {
-    const is_deps = std.mem.eql(u8, fact.key, "Deps");
+    const is_deps = std.mem.eql(u8, fact.key, key.deps);
 
     if (!is_deps) {
         try writer.writeAll("  ");
-        if (style.color) try writer.writeAll("\x1b[2m");
+        if (style.color) try writer.writeAll(ansi_dim);
         try writer.print("{s}:", .{fact.key});
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
         try writer.writeAll("\n");
     }
 
@@ -119,13 +131,13 @@ fn printDepLine(
     const soname = line[0..pos];
     const path = line[pos + sep.len ..];
 
-    if (style.color) try writer.writeAll("\x1b[1;37m");
+    if (style.color) try writer.writeAll(ansi_bold_white);
     try writer.writeAll(soname);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
 
-    if (style.color) try writer.writeAll("\x1b[2m");
+    if (style.color) try writer.writeAll(ansi_dim);
     try writer.writeAll(sep);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
 
     try printDepPath(writer, style, path);
 }
@@ -136,17 +148,17 @@ fn printDepPath(
     path: []const u8,
 ) !void {
     if (std.mem.eql(u8, path, "not found")) {
-        if (style.color) try writer.writeAll("\x1b[31m");
+        if (style.color) try writer.writeAll(ansi_red);
         try writer.writeAll(path);
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
     } else if (path.len > 0 and path[0] == '(') {
-        if (style.color) try writer.writeAll("\x1b[33m");
+        if (style.color) try writer.writeAll(ansi_yellow);
         try writer.writeAll(path);
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
     } else {
-        if (style.color) try writer.writeAll("\x1b[32m");
+        if (style.color) try writer.writeAll(ansi_green);
         try writer.writeAll(path);
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
     }
 }
 
@@ -160,16 +172,17 @@ fn printStat(
     // Format: "<perms 10 chars> <size> <owner> <date>"
     // size may be "<num>" or "<num> <unit>" (e.g. "162.7 KiB").
     // owner is always "user:group" (no spaces).
-    if (value.len < 11 or value[10] != ' ') {
+    const perms_len: usize = 10;
+    if (value.len < perms_len + 1 or value[perms_len] != ' ') {
         try writer.writeAll(value);
         try writer.writeAll("\n");
         return;
     }
-    const perms = value[0..10];
+    const perms = value[0..perms_len];
     try printPerms(writer, style, perms);
     try writer.writeAll(" ");
 
-    var rest = value[11..];
+    var rest = value[perms_len + 1 ..];
     var lead: usize = 0;
     while (lead < rest.len and rest[lead] == ' ') : (lead += 1) {}
     rest = rest[lead..];
@@ -190,10 +203,10 @@ fn printStat(
         }
     }
 
-    const size = rest[0..size_take - 1];
-    if (style.color) try writer.writeAll("\x1b[1;37m");
+    const size = rest[0 .. size_take - 1];
+    if (style.color) try writer.writeAll(ansi_bold_white);
     try writer.writeAll(size);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     try writer.writeAll(" ");
 
     var owner_iter = std.mem.splitScalar(u8, rest[size_take..], ' ');
@@ -201,15 +214,15 @@ fn printStat(
         try writer.writeAll("\n");
         return;
     };
-    if (style.color) try writer.writeAll("\x1b[33m");
+    if (style.color) try writer.writeAll(ansi_yellow);
     try writer.writeAll(owner);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     try writer.writeAll(" ");
 
     const date = owner_iter.rest();
-    if (style.color) try writer.writeAll("\x1b[36m");
+    if (style.color) try writer.writeAll(ansi_cyan);
     try writer.writeAll(date);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     try writer.writeAll("\n");
 }
 
@@ -226,10 +239,10 @@ fn printPerms(
     try writer.writeAll(&.{perm[0]});
 
     const r_indices = [_]usize{ 1, 4, 7 };
-    for (r_indices) |i| try writePermChar(writer, perm[i], 'r', "\x1b[32m");
+    for (r_indices) |i| try writePermChar(writer, perm[i], 'r', ansi_green);
 
     const w_indices = [_]usize{ 2, 5, 8 };
-    for (w_indices) |i| try writePermChar(writer, perm[i], 'w', "\x1b[33m");
+    for (w_indices) |i| try writePermChar(writer, perm[i], 'w', ansi_yellow);
 
     const x_indices = [_]usize{ 3, 6 };
     for (x_indices) |i| try writeExecChar(writer, perm[i], &.{ 'x', 's' });
@@ -246,11 +259,11 @@ fn writePermChar(
     if (ch == target) {
         try writer.writeAll(on_color);
         try writer.writeAll(&.{ch});
-        try writer.writeAll("\x1b[0m");
+        try writer.writeAll(ansi_reset);
     } else {
-        try writer.writeAll("\x1b[2m");
+        try writer.writeAll(ansi_dim);
         try writer.writeAll(&.{ch});
-        try writer.writeAll("\x1b[0m");
+        try writer.writeAll(ansi_reset);
     }
 }
 
@@ -264,13 +277,13 @@ fn writeExecChar(
     } else false;
 
     if (matched) {
-        try writer.writeAll("\x1b[31m");
+        try writer.writeAll(ansi_red);
         try writer.writeAll(&.{ch});
-        try writer.writeAll("\x1b[0m");
+        try writer.writeAll(ansi_reset);
     } else {
-        try writer.writeAll("\x1b[2m");
+        try writer.writeAll(ansi_dim);
         try writer.writeAll(&.{ch});
-        try writer.writeAll("\x1b[0m");
+        try writer.writeAll(ansi_reset);
     }
 }
 
@@ -291,7 +304,7 @@ fn printPkg(
     if (style.color) try writer.writeAll("\x1b[1;35m");
     try writer.writeAll(repo);
     try writer.writeAll("/");
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
 
     // Pull off trailing filepath token: anything after the last space, unless
     // that last token itself is a bracketed marker like [installed].
@@ -309,9 +322,9 @@ fn printPkg(
         try writer.writeAll(pkg_part);
         if (filepath) |fp| {
             try writer.writeAll(" ");
-            if (style.color) try writer.writeAll("\x1b[37m");
+            if (style.color) try writer.writeAll(ansi_white);
             try writer.writeAll(fp);
-            if (style.color) try writer.writeAll("\x1b[0m");
+            if (style.color) try writer.writeAll(ansi_reset);
         }
         try writer.writeAll("\n");
         return;
@@ -328,22 +341,22 @@ fn printPkg(
 
     if (style.color) try writer.writeAll("\x1b[1m");
     try writer.writeAll(name);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     try writer.writeAll(" ");
     if (style.color) try writer.writeAll("\x1b[1;32m");
     try writer.writeAll(version);
-    if (style.color) try writer.writeAll("\x1b[0m");
+    if (style.color) try writer.writeAll(ansi_reset);
     if (has_installed) {
         try writer.writeAll(" ");
-        if (style.color) try writer.writeAll("\x1b[1;36m");
+        if (style.color) try writer.writeAll(ansi_bold_cyan);
         try writer.writeAll("[installed]");
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
     }
     if (filepath) |fp| {
         try writer.writeAll(" ");
-        if (style.color) try writer.writeAll("\x1b[37m");
+        if (style.color) try writer.writeAll(ansi_white);
         try writer.writeAll(fp);
-        if (style.color) try writer.writeAll("\x1b[0m");
+        if (style.color) try writer.writeAll(ansi_reset);
     }
     try writer.writeAll("\n");
 }

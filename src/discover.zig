@@ -40,11 +40,11 @@ pub fn findBinary(
 
     const path_value = environ_map.get("PATH") orelse "";
 
-    var it = std.mem.splitScalar(u8, path_value, std.fs.path.delimiter);
+    // tokenizeScalar skips empty components, which is the security-relevant
+    // behavior: an empty PATH element must not resolve to cwd (POSIX deviation).
+    var it = std.mem.tokenizeScalar(u8, path_value, std.fs.path.delimiter);
     while (it.next()) |dir| {
-        // Security: skip empty PATH components rather than searching cwd (POSIX deviation).
-        if (dir.len == 0) continue;
-        const full = try std.fs.path.join(arena, &[_][]const u8{ dir, name });
+        const full = try std.fs.path.join(arena, &.{ dir, name });
         if (linuxIsExecutable(full)) {
             try results.append(arena, .{ .path = full, .from_binary = true });
             if (!options.search_all) return results.items;
@@ -60,7 +60,6 @@ pub fn find(
     name: []const u8,
     options: FindOptions,
 ) ![]Match {
-    // Explicit path: check existence directly, no search.
     if (std.mem.indexOfScalar(u8, name, '/') != null) {
         if (util.fileExists(name) or isSymlink(name)) {
             var r: std.ArrayList(Match) = .empty;
@@ -141,9 +140,8 @@ pub fn findLibrary(
     defer search_dirs.deinit(arena);
 
     const ld_path = environ_map.get("LD_LIBRARY_PATH") orelse "";
-    var it = std.mem.splitScalar(u8, ld_path, std.fs.path.delimiter);
+    var it = std.mem.tokenizeScalar(u8, ld_path, std.fs.path.delimiter);
     while (it.next()) |dir| {
-        if (dir.len == 0) continue;
         try search_dirs.append(arena, dir);
     }
     for (library_paths) |dir| {
@@ -152,8 +150,7 @@ pub fn findLibrary(
 
     const name_with_so = try std.mem.concat(arena, u8, &.{ "lib", name, ".so" });
     const name_with_a = try std.mem.concat(arena, u8, &.{ "lib", name, ".a" });
-    const bare_so = std.mem.startsWith(u8, name, "lib")
-        and std.mem.endsWith(u8, name, ".so");
+    const bare_so = std.mem.startsWith(u8, name, "lib") and std.mem.endsWith(u8, name, ".so");
     var candidates: std.ArrayList([]const u8) = .empty;
     defer candidates.deinit(arena);
     try candidates.append(arena, name);
@@ -165,7 +162,7 @@ pub fn findLibrary(
 
     for (search_dirs.items) |dir| {
         for (candidates.items) |cand| {
-            const full = try std.fs.path.join(arena, &[_][]const u8{ dir, cand });
+            const full = try std.fs.path.join(arena, &.{ dir, cand });
             if (util.fileExists(full)) {
                 try results.append(arena, .{ .path = full });
                 if (!options.search_all) return results.items;

@@ -1,4 +1,6 @@
 //! wh - enhanced which/ldd replacement
+const std = @import("std");
+
 pub const util = @import("util.zig");
 pub const discover = @import("discover.zig");
 pub const provider = @import("provider.zig");
@@ -8,11 +10,18 @@ pub const elf_parse = @import("elf_parse.zig");
 pub const ld_cache = @import("ld_cache.zig");
 pub const elf_info = @import("providers/elf_info.zig");
 pub const elf_deps = @import("providers/elf_deps.zig");
-pub const pacdb = @import("providers/pacdb.zig");
-pub const pacrepo = @import("providers/pacrepo.zig");
-pub const pacfiles = @import("providers/pacfiles.zig");
+pub const pacdb = @import("providers/pacman/pacdb.zig");
+pub const pacrepo = @import("providers/pacman/pacrepo.zig");
+pub const pacfiles = @import("providers/pacman/pacfiles.zig");
 pub const pacman = @import("providers/pacman.zig");
-pub const plocate = @import("plocate.zig");
+pub const plocate = @import("plocate");
+
+// The codebase uses @intCast(u64 -> usize) extensively (e.g. ELF section
+// offsets, file sizes). 32-bit targets would silently truncate these values
+// and risk out-of-bounds reads. Pin to 64-bit only and assert at compile time.
+comptime {
+    std.debug.assert(@sizeOf(usize) == 8);
+}
 
 test "root module" {
     _ = util;

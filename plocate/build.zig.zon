@@ -1,0 +1,7 @@
+.{
+    .name = .plocate,
+    .version = "0.1.0",
+    .fingerprint = 0x35df037ac8fa66d,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "src", "build.zig.zon", "build.zig" },
+}

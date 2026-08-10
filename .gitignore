@@ -14,3 +14,4 @@ zig-pkg/
 
 # Deepwork state (git-local)
 .slim/deepwork/
+deps/

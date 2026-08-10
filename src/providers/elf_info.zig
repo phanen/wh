@@ -5,16 +5,11 @@ const provider = @import("../provider.zig");
 const elf_parse = @import("../elf_parse.zig");
 const Context = provider.Context;
 const Fact = provider.Fact;
+const key = provider.fact_key;
 
-pub fn run(ctx: Context) anyerror![]Fact {
+pub fn run(ctx: Context) ![]Fact {
     var facts: std.ArrayList(Fact) = .empty;
-    errdefer {
-        for (facts.items) |f| {
-            ctx.gpa.free(f.key);
-            ctx.gpa.free(f.value);
-        }
-        facts.deinit(ctx.gpa);
-    }
+    errdefer provider.deinitFacts(ctx.gpa, &facts);
 
     var parsed = elf_parse.parseFile(ctx.gpa, ctx.io, ctx.path) catch
         return try facts.toOwnedSlice(ctx.gpa);
@@ -41,13 +36,13 @@ pub fn run(ctx: Context) anyerror![]Fact {
         .{ class_str, endian_str, type_str, machine_str },
     ) catch "ELF binary";
     try facts.append(ctx.gpa, .{
-        .key = try ctx.gpa.dupe(u8, "ELF"),
+        .key = try ctx.gpa.dupe(u8, key.elf),
         .value = try ctx.gpa.dupe(u8, line),
     });
 
     if (parsed.interp) |interp| {
         try facts.append(ctx.gpa, .{
-            .key = try ctx.gpa.dupe(u8, "Interpreter"),
+            .key = try ctx.gpa.dupe(u8, key.interpreter),
             .value = try ctx.gpa.dupe(u8, interp),
         });
     }
