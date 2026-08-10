@@ -6,7 +6,6 @@ const wh = @import("wh");
 const discover = wh.discover;
 const provider = wh.provider;
 const output = wh.output;
-const util = wh.util;
 const file_meta = wh.file_meta;
 const elf_info = wh.elf_info;
 const elf_deps = wh.elf_deps;
@@ -140,25 +139,16 @@ fn processTarget(
     target: []const u8,
     opts: discover.FindOptions,
 ) !bool {
-    var found = false;
+    const is_explicit_path = std.mem.indexOfScalar(u8, target, '/') != null;
 
     const matches = try discover.find(ctx.arena, ctx.environ_map, target, opts);
 
     if (matches.len == 0) {
-        const printed = try runPacmanAndPrint(ctx, target, true, false);
-        if (!printed) {
-            try ctx.stderr_writer.writeAll("error: not found: ");
-            try ctx.stderr_writer.writeAll(target);
-            try ctx.stderr_writer.writeAll("\n");
-            ctx.stderr_writer.flush() catch {};
-        } else {
-            found = true;
-        }
-        return found;
+        return directQuery(ctx, target);
     }
 
-    found = true;
-
+    var found = false;
+    var query_used = false;
     for (matches, 0..) |m, i| {
         if (i > 0) try ctx.stdout_writer.writeByte('\n');
 
@@ -181,19 +171,58 @@ fn processTarget(
             for (facts) |f| try output.printFact(ctx.stdout_writer, ctx.style, f);
         }
 
-        _ = try runPacmanAndPrint(ctx, m.path, false, false);
+        const search_name = searchName(is_explicit_path, target, m);
+        if (std.mem.eql(u8, search_name, target)) query_used = true;
+        _ = try runPacmanAndPrint(ctx, search_name, false, false);
+        found = true;
     }
 
-    const has_binary = for (matches) |m| {
-        if (m.from_binary) break true;
-    } else false;
-    const is_bare_name = std.mem.indexOfScalar(u8, target, '/') == null;
-    const do_dual_query = !opts.search_libs and is_bare_name and (opts.search_all or !has_binary);
-    if (do_dual_query) {
-        _ = try runPacmanAndPrint(ctx, target, true, true);
+    // A bare query no section used as its pacman name gets its own section,
+    // because the resolved name (e.g. libz.so) is a different query than "z".
+    if (!is_explicit_path and !query_used) {
+        found = try runPacmanAndPrint(ctx, target, true, true) or found;
     }
 
     return found;
+}
+
+/// exe and explicit paths query pacman by the query itself; libs query by the
+/// version-stripped SONAME because pacman basename matching keys on the file:
+/// /lib/libz.so -> "libz.so", not the resolved path.
+fn searchName(is_explicit_path: bool, query: []const u8, m: discover.Match) []const u8 {
+    if (is_explicit_path) return query;
+    if (m.from_binary) return query;
+    return libSoname(m.path);
+}
+
+/// Returns a sub-slice of `path`; callers must not free it.
+fn libSoname(path: []const u8) []const u8 {
+    var base = std.fs.path.basename(path);
+    while (base.len > 0) {
+        const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse break;
+        const tail = base[dot + 1 ..];
+        if (tail.len == 0) break;
+        var all_digits = true;
+        for (tail) |c| if (!std.ascii.isDigit(c)) {
+            all_digits = false;
+            break;
+        };
+        if (!all_digits) break;
+        base = base[0..dot];
+    }
+    return base;
+}
+
+fn directQuery(ctx: *RunContext, target: []const u8) !bool {
+    const printed = try runPacmanAndPrint(ctx, target, true, false);
+    if (!printed) {
+        try ctx.stderr_writer.writeAll("error: not found: ");
+        try ctx.stderr_writer.writeAll(target);
+        try ctx.stderr_writer.writeAll("\n");
+        ctx.stderr_writer.flush() catch {};
+        return false;
+    }
+    return true;
 }
 
 const ParseResult = struct {
@@ -264,11 +293,11 @@ fn printUsage(writer: *std.Io.Writer) !void {
     try writer.writeAll(
         \\Usage: wh [OPTIONS] NAME...
         \\
-        \\Show file metadata for binaries or libraries.
+        \\Query package files, or show metadata for a specific file path.
         \\
         \\Options:
-        \\  -a, --all       Show all matches in PATH
-        \\  -l, --libs      Search library paths (-l m looks for libm.so etc.)
+        \\  -a, --all       Show all resolved library matches
+        \\  -l, --libs      Resolve NAME to a library path and show its metadata
         \\  -h, --help      Show this help
         \\  -V, --version   Show version
         \\
