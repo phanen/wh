@@ -149,6 +149,8 @@ fn processTarget(
 
     var found = false;
     var query_used = false;
+    var seen_names: [8][]const u8 = undefined;
+    var seen_count: usize = 0;
     for (matches, 0..) |m, i| {
         if (i > 0) try ctx.stdout_writer.writeByte('\n');
 
@@ -171,9 +173,16 @@ fn processTarget(
             for (facts) |f| try output.printFact(ctx.stdout_writer, ctx.style, f);
         }
 
+        // Run pacman once per distinct query name; several matches share one.
         const search_name = searchName(is_explicit_path, target, m);
         if (std.mem.eql(u8, search_name, target)) query_used = true;
-        _ = try runPacmanAndPrint(ctx, search_name, false, false);
+        if (!hasSeenName(seen_names[0..seen_count], search_name)) {
+            if (seen_count < seen_names.len) {
+                seen_names[seen_count] = search_name;
+                seen_count += 1;
+                _ = try runPacmanAndPrint(ctx, search_name, false, false);
+            }
+        }
         found = true;
     }
 
@@ -211,6 +220,11 @@ fn libSoname(path: []const u8) []const u8 {
         base = base[0..dot];
     }
     return base;
+}
+
+fn hasSeenName(seen: []const []const u8, name: []const u8) bool {
+    for (seen) |s| if (std.mem.eql(u8, s, name)) return true;
+    return false;
 }
 
 fn directQuery(ctx: *RunContext, target: []const u8) !bool {
