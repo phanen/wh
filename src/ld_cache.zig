@@ -1,11 +1,16 @@
-//! /etc/ld.so.cache binary search reader.
+//! /etc/ld.so.cache reader.
 //!
-//! Cache header byte layout:
-//!   [0..17]   magic "glibc-ld.so.cache\0"
-//!   [18..20]  version "1.1\0"
-//!   [21..24]  nlibs (u32)
-//!   [25..28]  len_strings (u32)
-//!   [29..47]  padding to 48-byte aligned header
+//! Header layout (glibc dl-cache.h, struct cache_file_new):
+//!   [0..17]  magic "glibc-ld.so.cache"
+//!   [17..20] version "1.1"
+//!   [20..24] nlibs (u32)
+//!   [24..28] len_strings (u32)
+//!   [28]    flags (u8; low 2 bits = byte order)
+//!   [32..36] extension_offset (u32)
+//!   [36..48] unused padding
+//!
+//! Entries are DESCENDING by glibc `_dl_cache_libcmp` (digit-aware
+//! comparison), so lookups must use the same ordering.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -66,26 +71,21 @@ pub const LDCache = struct {
     }
 
     pub fn lookup(self: *const LDCache, soname: []const u8) ?[]const u8 {
-        // Entries are sorted DESCENDING by SONAME (glibc uses reversed _dl_cache_libcmp).
+        // glibc sorts DESCENDING by _dl_cache_libcmp, so the search must
+        // use libcmpOrder, not plain byte order (libfoo.so.2 < .so.10).
         var lo: u32 = 0;
         var hi: u32 = self.entry_count;
         while (lo < hi) {
             const mid: u32 = lo + (hi - lo) / 2;
             const entry_off = self.header_size + @as(usize, mid) * entry_size;
             const key_off = readU32(self.data, entry_off + 4, self.endian);
-            // /etc/ld.so.cache is untrusted external data; reject out-of-range
-            // offsets at runtime rather than asserting.
+            // Cache is untrusted external data; reject out-of-range offsets.
             if (key_off >= self.data.len) return null;
             const key = cstrAt(self.data, key_off);
-            const ord = std.mem.order(u8, key, soname);
-            if (ord == .eq) {
-                // Multiple entries may share the same SONAME with different architecture flags.
-                return self.pickBestArch(mid, soname);
-            }
-            if (ord == .gt) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+            switch (libcmpOrder(key, soname)) {
+                .eq => return self.pickBestArch(mid, soname),
+                .gt => lo = mid + 1,
+                .lt => hi = mid,
             }
         }
         return null;
@@ -176,6 +176,45 @@ fn readU32(data: []const u8, offset: usize, endian: std.builtin.Endian) u32 {
     return std.mem.readInt(u32, data[offset..][0..4], endian);
 }
 
+/// Mirrors glibc `_dl_cache_libcmp` (elf/dl-cache.c): digit runs are
+/// compared numerically, so libfoo.so.2 sorts before libfoo.so.10.
+/// End of string is less than any character. ldconfig sorts the cache
+/// with this ordering, so lookups must use it.
+fn libcmpOrder(left: []const u8, right: []const u8) std.math.Order {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < left.len) {
+        const lc = left[i];
+        if (lc >= '0' and lc <= '9') {
+            if (j < right.len and right[j] >= '0' and right[j] <= '9') {
+                var val_a: u64 = 0;
+                while (i < left.len and left[i] >= '0' and left[i] <= '9') : (i += 1) {
+                    val_a = val_a * 10 + (left[i] - '0');
+                }
+                var val_b: u64 = 0;
+                while (j < right.len and right[j] >= '0' and right[j] <= '9') : (j += 1) {
+                    val_b = val_b * 10 + (right[j] - '0');
+                }
+                if (val_a < val_b) return .lt;
+                if (val_a > val_b) return .gt;
+            } else {
+                // left has a digit where right has a non-digit or is exhausted.
+                return .gt;
+            }
+        } else if (j < right.len and right[j] >= '0' and right[j] <= '9') {
+            return .lt;
+        } else if (j >= right.len or lc != right[j]) {
+            if (j >= right.len) return .gt;
+            return if (lc < right[j]) .lt else .gt;
+        } else {
+            i += 1;
+            j += 1;
+        }
+    }
+    if (j < right.len) return .lt;
+    return .eq;
+}
+
 fn cstrAt(data: []const u8, offset: u32) []const u8 {
     const off: usize = @intCast(offset);
     if (off >= data.len) return "";
@@ -203,6 +242,33 @@ test "ld_cache: missing soname returns null" {
     defer cache.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(?[]const u8, null), cache.lookup("definitely-not-a-real-library.xyz123"));
+}
+
+// Every entry must be findable: glibc sorts by libcmpOrder, so a lookup
+// keyed on plain byte order would miss digit-padded names (regression test).
+test "ld_cache: every cache entry is findable" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var cache = try LDCache.load(std.testing.allocator, std.testing.io);
+    defer cache.deinit(std.testing.allocator);
+
+    var i: u32 = 0;
+    while (i < cache.entry_count) : (i += 1) {
+        const entry = cache.entryAt(i);
+        const found = cache.lookup(entry.soname);
+        try std.testing.expect(found != null);
+    }
+}
+
+test "ld_cache: libcmpOrder matches glibc numeric ordering" {
+    const Order = std.math.Order;
+    try std.testing.expectEqual(Order.lt, libcmpOrder("libfoo.so.2", "libfoo.so.10"));
+    try std.testing.expectEqual(Order.gt, libcmpOrder("libfoo.so.10", "libfoo.so.2"));
+    try std.testing.expectEqual(Order.eq, libcmpOrder("libfoo.so.10", "libfoo.so.010"));
+    try std.testing.expectEqual(Order.lt, libcmpOrder("liba.so.1", "libb.so.1"));
+    try std.testing.expectEqual(Order.gt, libcmpOrder("libb.so.1", "liba.so.1"));
+    try std.testing.expectEqual(Order.lt, libcmpOrder("libfoo.so.1", "libfoo.so.1.extra"));
+    // Leading zeros: both numeric values are zero, so compare equal.
+    try std.testing.expectEqual(Order.eq, libcmpOrder("libfoo.so.0", "libfoo.so.00"));
 }
 
 test "ld_cache: readU32 helper" {

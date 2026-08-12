@@ -90,23 +90,24 @@ fn resolveSoname(
         return .{ .path = "not found", .must_free = false };
     }
 
-    // $ORIGIN expands to the directory of the binary being analyzed.
+    // $ORIGIN expands to the binary's directory.
     const binary_dir = std.fs.path.dirname(ctx.path) orelse ".";
 
-    if (runpath) |rp| {
-        const expanded = expandTokens(ctx.gpa, rp, binary_dir) catch rp;
-        const need_free = expanded.ptr != rp.ptr;
-        defer if (need_free) ctx.gpa.free(expanded);
-        if (trySearchDirs(ctx, soname, expanded)) |p| return .{ .path = p, .must_free = true };
-    } else if (rpath) |rp| {
-        const expanded = expandTokens(ctx.gpa, rp, binary_dir) catch rp;
-        const need_free = expanded.ptr != rp.ptr;
-        defer if (need_free) ctx.gpa.free(expanded);
-        if (trySearchDirs(ctx, soname, expanded)) |p| return .{ .path = p, .must_free = true };
+    // glibc order (elf/dl-load.c): RPATH (only if no RUNPATH) ->
+    // LD_LIBRARY_PATH -> RUNPATH -> cache -> default dirs.
+    if (runpath == null) {
+        if (rpath) |rp| {
+            if (trySearchExpanded(ctx, soname, rp, binary_dir)) |p| return p;
+        }
     }
 
+    // LD_LIBRARY_PATH has no DST tokens; skip expansion.
     if (ctx.environ_map.get("LD_LIBRARY_PATH")) |ld_path| {
         if (trySearchDirs(ctx, soname, ld_path)) |p| return .{ .path = p, .must_free = true };
+    }
+
+    if (runpath) |rp| {
+        if (trySearchExpanded(ctx, soname, rp, binary_dir)) |p| return p;
     }
 
     if (cache_opt) |cache| {
@@ -179,6 +180,21 @@ fn trySearchDirs(ctx: Context, soname: []const u8, dir_list: []const u8) ?[]cons
         if (util.fileExists(full)) return full;
         ctx.gpa.free(full);
     }
+    return null;
+}
+
+/// Expand dynamic string tokens in RAW (RPATH/RUNPATH) and search each
+/// directory for SONAME.
+fn trySearchExpanded(
+    ctx: Context,
+    soname: []const u8,
+    raw: []const u8,
+    binary_dir: []const u8,
+) ?ResolvedPath {
+    const expanded = expandTokens(ctx.gpa, raw, binary_dir) catch raw;
+    const need_free = expanded.ptr != raw.ptr;
+    defer if (need_free) ctx.gpa.free(expanded);
+    if (trySearchDirs(ctx, soname, expanded)) |p| return .{ .path = p, .must_free = true };
     return null;
 }
 
