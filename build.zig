@@ -1,13 +1,26 @@
 const std = @import("std");
 
-const version = "0.1.0";
-
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Read version from build.zig.zon so --version always matches the manifest.
+    const zon_content = try b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        "build.zig.zon",
+        b.allocator,
+        .limited(4096),
+    );
+    defer b.allocator.free(zon_content);
+    const zon_content_z = try b.allocator.dupeZ(u8, zon_content);
+    defer b.allocator.free(zon_content_z);
+    const ZonInfo = struct { version: []const u8 };
+    const zon_info = try std.zon.parse.fromSliceAlloc(ZonInfo, b.allocator, zon_content_z, null, .{ .ignore_unknown_fields = true });
+    defer std.zon.parse.free(b.allocator, zon_info);
+    const version = try std.SemanticVersion.parse(zon_info.version);
+
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "version", version);
+    build_options.addOption(std.SemanticVersion, "version", version);
 
     const plocate_dep = b.dependency("plocate", .{
         .target = target,

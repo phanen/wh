@@ -17,7 +17,11 @@ const always_providers = [_]provider.Provider{
     .{ .name = "elf_deps", .run = elf_deps.run },
 };
 
-const version_str = "wh " ++ build_options.version;
+const version_str = std.fmt.comptimePrint("wh {d}.{d}.{d}", .{
+    build_options.version.major,
+    build_options.version.minor,
+    build_options.version.patch,
+});
 
 const stdout_scratch_size: usize = 4096;
 
