@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) !void {
     });
     mod.addImport("plocate", plocate_mod);
     mod.addImport("build_options", build_options.createModule());
+    mod.linkSystemLibrary("magic", .{});
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -49,6 +50,7 @@ pub fn build(b: *std.Build) !void {
         },
     });
     exe_mod.linkSystemLibrary("zstd", .{});
+    exe_mod.linkSystemLibrary("magic", .{});
 
     const exe = b.addExecutable(.{
         .name = "wh",
@@ -73,6 +75,7 @@ pub fn build(b: *std.Build) !void {
         .use_lld = true,
     });
     mod_tests.root_module.linkSystemLibrary("zstd", .{});
+    mod_tests.root_module.linkSystemLibrary("magic", .{});
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{

@@ -10,6 +10,7 @@ pub const elf_parse = @import("elf_parse.zig");
 pub const ld_cache = @import("ld_cache.zig");
 pub const elf_info = @import("providers/elf_info.zig");
 pub const elf_deps = @import("providers/elf_deps.zig");
+pub const magic_info = @import("providers/magic_info.zig");
 pub const pacdb = @import("providers/pacman/pacdb.zig");
 pub const pacrepo = @import("providers/pacman/pacrepo.zig");
 pub const pacfiles = @import("providers/pacman/pacfiles.zig");
@@ -33,6 +34,7 @@ test "root module" {
     _ = ld_cache;
     _ = elf_info;
     _ = elf_deps;
+    _ = magic_info;
     _ = pacdb;
     _ = pacrepo;
     _ = pacfiles;

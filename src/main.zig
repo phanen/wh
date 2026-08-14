@@ -9,12 +9,14 @@ const output = wh.output;
 const file_meta = wh.file_meta;
 const elf_info = wh.elf_info;
 const elf_deps = wh.elf_deps;
+const magic_info = wh.magic_info;
 const pacman = wh.pacman;
 
 const always_providers = [_]provider.Provider{
     .{ .name = "file_meta", .run = file_meta.run },
     .{ .name = "elf_info", .run = elf_info.run },
     .{ .name = "elf_deps", .run = elf_deps.run },
+    .{ .name = "magic_info", .run = magic_info.run },
 };
 
 const version_str = std.fmt.comptimePrint("wh {d}.{d}.{d}", .{
@@ -162,6 +164,8 @@ fn processTarget(
         defer if (symlink) |s| ctx.gpa.free(s);
         try output.printName(ctx.stdout_writer, ctx.style, m.path, symlink);
 
+        var all_facts: std.ArrayList(provider.Fact) = .empty;
+        defer provider.deinitFacts(ctx.gpa, &all_facts);
         for (always_providers) |p| {
             const pctx: provider.Context = .{
                 .gpa = ctx.gpa,
@@ -169,13 +173,16 @@ fn processTarget(
                 .io = ctx.io,
                 .environ_map = ctx.environ_map,
             };
-            const facts = p.run(pctx) catch |err| {
+            const pf = p.run(pctx) catch |err| {
                 try output.printError(ctx.stderr_writer, ctx.style, @errorName(err));
                 continue;
             };
-            defer freeFacts(ctx.gpa, facts);
-            for (facts) |f| try output.printFact(ctx.stdout_writer, ctx.style, f);
+            for (pf) |f| try all_facts.append(ctx.gpa, f);
+            ctx.gpa.free(pf);
         }
+
+        try mergeELFAndMagic(ctx.gpa, &all_facts);
+        for (all_facts.items) |f| try output.printFact(ctx.stdout_writer, ctx.style, f);
 
         // Run pacman once per distinct query name; several matches share one.
         const search_name = searchName(is_explicit_path, target, m);
@@ -241,6 +248,66 @@ fn directQuery(ctx: *RunContext, target: []const u8) !bool {
         return false;
     }
     return true;
+}
+
+/// When both ELF and Magic facts are present, extract extra info (BuildID,
+/// stripped, etc.) from the magic description, append it to the ELF value,
+/// then remove the Magic fact.
+fn mergeELFAndMagic(gpa: std.mem.Allocator, facts: *std.ArrayList(provider.Fact)) !void {
+    var elf_idx: ?usize = null;
+    var magic_idx: ?usize = null;
+    for (facts.items, 0..) |f, i| {
+        if (std.mem.eql(u8, f.key, provider.fact_key.elf)) elf_idx = i;
+        if (std.mem.eql(u8, f.key, provider.fact_key.magic)) magic_idx = i;
+    }
+    const ei = elf_idx orelse return;
+    const mi = magic_idx orelse return;
+
+    // Magic description format: "ELF <class> <endian> <type>, <machine>, <extra>"
+    const magic_val = facts.items[mi].value;
+    if (!std.mem.startsWith(u8, magic_val, "ELF ")) {
+        dropFact(gpa, facts, mi);
+        return;
+    }
+    var rest = magic_val[4..];
+    const comma1 = std.mem.indexOfScalar(u8, rest, ',') orelse {
+        dropFact(gpa, facts, mi);
+        return;
+    };
+    rest = std.mem.trim(u8, rest[comma1 + 1 ..], " ");
+    const comma2 = std.mem.indexOfScalar(u8, rest, ',') orelse {
+        dropFact(gpa, facts, mi);
+        return;
+    };
+    // Skip interpreter part since it's a separate fact.
+    const extra_raw = std.mem.trim(u8, rest[comma2 + 1 ..], " ");
+    var extra_buf: std.ArrayList(u8) = .empty;
+    errdefer extra_buf.deinit(gpa);
+    var extra_it = std.mem.splitScalar(u8, extra_raw, ',');
+    while (extra_it.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " ");
+        if (std.mem.startsWith(u8, trimmed, "interpreter")) continue;
+        if (extra_buf.items.len > 0) try extra_buf.appendSlice(gpa, ", ");
+        try extra_buf.appendSlice(gpa, trimmed);
+    }
+    if (extra_buf.items.len == 0) {
+        dropFact(gpa, facts, mi);
+        return;
+    }
+    const new_elf = try std.fmt.allocPrint(gpa, "{s}, {s}", .{
+        facts.items[ei].value,
+        extra_buf.items,
+    });
+    extra_buf.deinit(gpa);
+    gpa.free(facts.items[ei].value);
+    facts.items[ei].value = new_elf;
+    dropFact(gpa, facts, mi);
+}
+
+fn dropFact(gpa: std.mem.Allocator, facts: *std.ArrayList(provider.Fact), idx: usize) void {
+    gpa.free(facts.items[idx].key);
+    gpa.free(facts.items[idx].value);
+    _ = facts.orderedRemove(idx);
 }
 
 const ParseResult = struct {

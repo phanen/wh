@@ -22,6 +22,7 @@ pub const fact_key = struct {
     pub const interpreter: []const u8 = "Interpreter";
     pub const deps: []const u8 = "Deps";
     pub const pkg: []const u8 = "Pkg";
+    pub const magic: []const u8 = "Magic";
 };
 
 pub const RunFn = *const fn (ctx: Context) anyerror![]Fact;
