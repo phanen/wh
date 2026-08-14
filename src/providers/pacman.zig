@@ -1,14 +1,7 @@
-//! Unified pacman ownership provider.
-//!
-//! Queries local DB (installed status) and repo DB (pacfiles/pacrepo) together.
-//! Returns one Pkg fact per matching package; the pacman filepath is appended
-//! to the Pkg value so it renders on the same line.
-//!
-//! Result policy: repo DB results are the primary display, annotated with
-//! `[installed]` when the local DB names the same package. The local DB is
-//! authoritative only as a fallback: it is emitted for explicit paths when no
-//! repo result already names the installed package, because repo DBs may be
-//! stale or lack the file entirely (the pacdb query can never be skipped).
+//! Unified pacman ownership provider. Combines local DB and repo DB results.
+//! `[installed]` is shown on every match whose package is installed locally,
+//! not only the one that owns the queried file. The local DB fallback exists
+//! because repo DBs may be stale or lack the file entirely.
 
 const std = @import("std");
 const provider = @import("../provider.zig");
@@ -22,10 +15,33 @@ const Context = provider.Context;
 const Fact = provider.Fact;
 const fkey = provider.fact_key;
 
-/// True iff the locally-installed package has this name. At most one package
-/// owns a file, so the installed status is a single bit.
-fn isInstalled(local: ?pacdb.LocalPkg, name: []const u8) bool {
-    return if (local) |p| std.mem.eql(u8, p.name, name) else false;
+const pacman_local_dir = "/var/lib/pacman/local";
+
+fn getInstalledPkgs(gpa: std.mem.Allocator, io: std.Io) !std.ArrayList([]const u8) {
+    var pkgs: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (pkgs.items) |p| gpa.free(p);
+        pkgs.deinit(gpa);
+    }
+
+    var local_dir = std.Io.Dir.openDirAbsolute(io, pacman_local_dir, .{ .iterate = true }) catch return pkgs;
+    defer local_dir.close(io);
+
+    var iter = local_dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const split = pacdb.splitPkgDirName(entry.name);
+        try pkgs.append(gpa, try gpa.dupe(u8, split.name));
+    }
+
+    return pkgs;
+}
+
+fn isInstalled(installed: *const std.ArrayList([]const u8), name: []const u8) bool {
+    for (installed.items) |p| {
+        if (std.mem.eql(u8, p, name)) return true;
+    }
+    return false;
 }
 
 pub fn run(ctx: Context) ![]Fact {
@@ -45,6 +61,12 @@ pub fn run(ctx: Context) ![]Fact {
     const local = try pacdb.run(norm_ctx);
     defer if (local) |p| p.free(ctx.gpa);
 
+    var installed_pkgs = try getInstalledPkgs(ctx.gpa, ctx.io);
+    defer {
+        for (installed_pkgs.items) |p| ctx.gpa.free(p);
+        installed_pkgs.deinit(ctx.gpa);
+    }
+
     // Bare-name queries skip the local fallback: the pacdb basename scan costs
     // a full local DB walk and returns an arbitrary first match.
     const is_explicit_path = std.mem.indexOfScalar(u8, ctx.path, '/') != null;
@@ -54,14 +76,14 @@ pub fn run(ctx: Context) ![]Fact {
         defer plocate.freeMatches(matches, ctx.gpa);
         try appendLocalFallback(ctx.gpa, &result, local, is_explicit_path, matches, "pkgname");
         for (matches) |m| {
-            try appendMatch(ctx.gpa, &result, m.repo, m.pkgname, m.version, m.filepath, isInstalled(local, m.pkgname));
+            try appendMatch(ctx.gpa, &result, m.repo, m.pkgname, m.version, m.filepath, isInstalled(&installed_pkgs, m.pkgname));
         }
     } else {
         const matches = try pacrepo.run(norm_ctx);
         defer freeRepoMatches(ctx.gpa, matches);
         try appendLocalFallback(ctx.gpa, &result, local, is_explicit_path, matches, "name");
         for (matches) |m| {
-            try appendMatch(ctx.gpa, &result, m.repo, m.name, m.version, m.filepath, isInstalled(local, m.name));
+            try appendMatch(ctx.gpa, &result, m.repo, m.name, m.version, m.filepath, isInstalled(&installed_pkgs, m.name));
         }
     }
 
@@ -73,9 +95,6 @@ fn freeRepoMatches(gpa: std.mem.Allocator, matches: []const pacrepo.PkgMatch) vo
     gpa.free(matches);
 }
 
-/// Emits the installed DB result as a fallback line, unless a repo result
-/// already names the same package (that line then carries the `[installed]`
-/// marker and printing the local DB again would duplicate the fact).
 fn appendLocalFallback(
     gpa: std.mem.Allocator,
     result: *std.ArrayList(Fact),

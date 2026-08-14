@@ -81,9 +81,9 @@ const Match = struct {
     }
 };
 
-const PkgDirSplit = struct { name: []const u8, version: []const u8 };
+pub const PkgDirSplit = struct { name: []const u8, version: []const u8 };
 
-fn splitPkgDirName(dir_name: []const u8) PkgDirSplit {
+pub fn splitPkgDirName(dir_name: []const u8) PkgDirSplit {
     var dash_count: usize = 0;
     var version_start: usize = dir_name.len;
     var i: usize = dir_name.len;
